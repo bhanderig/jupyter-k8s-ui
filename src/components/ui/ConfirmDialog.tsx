@@ -1,6 +1,4 @@
-import {
-  Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button,
-} from '@mui/material';
+import { Dialog, DialogTitle, DialogContent, DialogContentText, DialogActions, Button } from '@mui/material';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -12,6 +10,7 @@ interface ConfirmDialogProps {
   onCancel: () => void;
   isDestructive?: boolean;
   isLoading?: boolean;
+  loadingLabel?: string;
 }
 
 export function ConfirmDialog({
@@ -24,6 +23,7 @@ export function ConfirmDialog({
   onCancel,
   isDestructive = false,
   isLoading = false,
+  loadingLabel = 'Processing...',
 }: ConfirmDialogProps) {
   return (
     <Dialog open={open} onClose={onCancel} aria-labelledby="confirm-dialog-title" aria-describedby="confirm-dialog-description">
@@ -32,9 +32,11 @@ export function ConfirmDialog({
         <DialogContentText id="confirm-dialog-description">{message}</DialogContentText>
       </DialogContent>
       <DialogActions sx={{ px: 3, pb: 2 }}>
-        <Button onClick={onCancel} variant="outlined" disabled={isLoading}>{cancelLabel}</Button>
+        <Button onClick={onCancel} variant="outlined" disabled={isLoading}>
+          {cancelLabel}
+        </Button>
         <Button onClick={onConfirm} variant="contained" color={isDestructive ? 'error' : 'primary'} disabled={isLoading}>
-          {isLoading ? 'Deleting...' : confirmLabel}
+          {isLoading ? loadingLabel : confirmLabel}
         </Button>
       </DialogActions>
     </Dialog>

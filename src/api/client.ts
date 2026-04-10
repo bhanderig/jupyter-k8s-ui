@@ -1,34 +1,33 @@
-import type { Workspace, WorkspaceTemplate, CreateWorkspaceRequest } from '../types';
+import type { Workspace, WorkspaceTemplate, CreateWorkspaceRequest, UpdateWorkspaceRequest } from '../types';
+import { handleUnauthorized, clearAuthReloadFlag } from './auth-interceptor';
 
 const API_BASE = '/api/v1';
 
 class ApiClient {
   private async request<T>(path: string, options?: RequestInit): Promise<T> {
-    // Prepare headers
-    const headers: Record<string, string> = { 
+    const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
-    // Merge additional headers if provided
     if (options?.headers) {
-      const additionalHeaders = options.headers as Record<string, string>;
-      Object.assign(headers, additionalHeaders);
+      Object.assign(headers, options.headers as Record<string, string>);
     }
-
-    // In development, the backend reads DEV_ACCESS_TOKEN from .env
-    // No need to send Authorization header from frontend
 
     const response = await fetch(`${API_BASE}${path}`, {
       ...options,
-      credentials: 'include', // For production oauth2-proxy cookies
+      credentials: 'include',
       headers,
     });
 
     if (!response.ok) {
+      if (response.status === 401) {
+        handleUnauthorized();
+      }
       const error = await response.text();
       throw new Error(error || `Request failed: ${response.status}`);
     }
 
+    clearAuthReloadFlag();
     return response.json();
   }
 
@@ -38,22 +37,23 @@ class ApiClient {
 
   getWorkspace = (name: string) => this.request<Workspace>(`/workspaces/${name}`);
 
-  createWorkspace = (data: CreateWorkspaceRequest) =>
-    this.request<Workspace>('/workspaces', { method: 'POST', body: JSON.stringify(data) });
+  createWorkspace = (data: CreateWorkspaceRequest) => this.request<Workspace>('/workspaces', { method: 'POST', body: JSON.stringify(data) });
 
-  deleteWorkspace = (name: string) =>
-    this.request<void>(`/workspaces/${name}`, { method: 'DELETE' });
+  updateWorkspace = (name: string, data: UpdateWorkspaceRequest) =>
+    this.request<Workspace>(`/workspaces/${name}`, { method: 'PUT', body: JSON.stringify(data) });
+
+  deleteWorkspace = (name: string) => this.request<void>(`/workspaces/${name}`, { method: 'DELETE' });
 
   startWorkspace = (name: string) =>
-    this.request<Workspace>(`/workspaces/${name}`, { 
-      method: 'PATCH', 
-      body: JSON.stringify({ desiredStatus: 'Running' }) 
+    this.request<Workspace>(`/workspaces/${name}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ desiredStatus: 'Running' }),
     });
 
   stopWorkspace = (name: string) =>
-    this.request<Workspace>(`/workspaces/${name}`, { 
-      method: 'PATCH', 
-      body: JSON.stringify({ desiredStatus: 'Stopped' }) 
+    this.request<Workspace>(`/workspaces/${name}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ desiredStatus: 'Stopped' }),
     });
 }
 

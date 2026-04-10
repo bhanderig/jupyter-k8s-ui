@@ -1,14 +1,9 @@
 import { KubeConfig, CustomObjectsApi } from '@kubernetes/client-node';
 import { existsSync } from 'fs';
+import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
-import type {
-  K8sWorkspace,
-  K8sWorkspaceTemplate,
-  WorkspaceResponse,
-  TemplateResponse,
-  ServerConfig,
-} from './types';
+import type { K8sWorkspace, K8sWorkspaceTemplate, WorkspaceResponse, TemplateResponse, ServerConfig } from './types';
 
 // --- Server Configuration ---
 
@@ -21,6 +16,21 @@ export const serverConfig: ServerConfig = {
   devAccessToken: '',
   port: 8090,
   logLevel: 'info',
+  session: {
+    enabled: false,
+    cookieName: 'workspace_console_session',
+    cookiePath: '/api/',
+    cookieMaxAgeSecs: 2700,
+    maxSessionLifetimeSecs: 3600,
+    nearExpiryThresholdSecs: 600,
+    secretName: 'web-app-session-secret',
+    secretNamespace: '',
+    keyPrefix: 'session-key-',
+    newKeyUseDelaySecs: 60,
+    cookieSizeWarnBytes: 3800,
+    cookieSizeMaxBytes: 4096,
+    expectedDomain: '',
+  },
 };
 
 export function initializeConfig(): void {
@@ -29,15 +39,27 @@ export function initializeConfig(): void {
   serverConfig.namespace = process.env.NAMESPACE || 'default';
   serverConfig.staticDir = process.env.STATIC_DIR || './dist';
   serverConfig.devUser = process.env.DEV_USER || '';
-  serverConfig.devAccessToken = isDev ? (process.env.DEV_ACCESS_TOKEN || '') : '';
+  serverConfig.devAccessToken = isDev ? process.env.DEV_ACCESS_TOKEN || '' : '';
   serverConfig.port = parseInt(process.env.PORT || '8090', 10);
   serverConfig.logLevel = (process.env.LOG_LEVEL as ServerConfig['logLevel']) || (isDev ? 'debug' : 'info');
 
   if (!isDev && process.env.DEV_ACCESS_TOKEN) {
     console.warn('⚠️  WARNING: DEV_ACCESS_TOKEN is set but will be ignored in production mode');
   }
-}
 
+  // Session config
+  serverConfig.session.enabled = process.env.SESSION_ENABLED !== 'false';
+  serverConfig.session.cookieName = process.env.SESSION_COOKIE_NAME || 'workspace_console_session';
+  serverConfig.session.cookiePath = process.env.SESSION_COOKIE_PATH || '/api/';
+  serverConfig.session.cookieMaxAgeSecs = parseInt(process.env.SESSION_COOKIE_MAX_AGE_SECS || '2700', 10);
+  serverConfig.session.maxSessionLifetimeSecs = parseInt(process.env.SESSION_MAX_LIFETIME_SECS || '3600', 10);
+  serverConfig.session.nearExpiryThresholdSecs = parseInt(process.env.SESSION_NEAR_EXPIRY_THRESHOLD_SECS || '600', 10);
+  serverConfig.session.secretName = process.env.SESSION_SECRET_NAME || 'web-app-session-secret';
+  serverConfig.session.secretNamespace = process.env.SESSION_SECRET_NAMESPACE || serverConfig.namespace;
+  serverConfig.session.keyPrefix = process.env.SESSION_KEY_PREFIX || 'session-key-';
+  serverConfig.session.newKeyUseDelaySecs = parseInt(process.env.SESSION_NEW_KEY_USE_DELAY_SECS || '60', 10);
+  serverConfig.session.expectedDomain = process.env.SESSION_EXPECTED_DOMAIN || '';
+}
 
 // --- Environment Detection ---
 
@@ -102,7 +124,8 @@ export function createKubeConfig(jwt: string | null): KubeConfig {
 // Simple LRU-ish cache: one client per JWT, with a short TTL.
 // Avoids re-creating KubeConfig + API client on every single request.
 const clientCache = new Map<string, { client: CustomObjectsApi; expiresAt: number }>();
-const CLIENT_CACHE_TTL_MS = 30_000; // 30 seconds
+const CLIENT_CACHE_TTL_MS = 10 * 60_000; // 10 minutes
+const CLIENT_CACHE_MAX_SIZE = 100;
 const CLIENT_CACHE_KEY_NO_JWT = '__service_account__';
 
 function getCachedClient(cacheKey: string): CustomObjectsApi | null {
@@ -120,7 +143,7 @@ function setCachedClient(cacheKey: string, client: CustomObjectsApi): void {
   clientCache.set(cacheKey, { client, expiresAt: Date.now() + CLIENT_CACHE_TTL_MS });
 
   // Evict stale entries if cache grows (unlikely but defensive)
-  if (clientCache.size > 100) {
+  if (clientCache.size > CLIENT_CACHE_MAX_SIZE) {
     const now = Date.now();
     for (const [key, val] of clientCache) {
       if (now >= val.expiresAt) clientCache.delete(key);
@@ -128,12 +151,17 @@ function setCachedClient(cacheKey: string, client: CustomObjectsApi): void {
   }
 }
 
+/** Hash a JWT to use as a cache key instead of storing the full token string */
+function hashJWT(jwt: string): string {
+  return createHash('sha256').update(jwt).digest('hex');
+}
+
 export async function createUserK8sClient(jwt: string | null): Promise<CustomObjectsApi> {
   if (isLocalDevelopment()) {
     return createMockK8sClient();
   }
 
-  const cacheKey = jwt || CLIENT_CACHE_KEY_NO_JWT;
+  const cacheKey = jwt ? hashJWT(jwt) : CLIENT_CACHE_KEY_NO_JWT;
   const cached = getCachedClient(cacheKey);
   if (cached) return cached;
 
@@ -163,7 +191,6 @@ function createMockK8sClient(): CustomObjectsApi {
   } as unknown as CustomObjectsApi;
 }
 
-
 // --- Service Account Client (cached singleton) ---
 
 let serviceAccountClient: CustomObjectsApi | null = null;
@@ -189,9 +216,7 @@ export async function createServiceAccountK8sClient(): Promise<CustomObjectsApi>
       serviceAccountClient = kc.makeApiClient(CustomObjectsApi);
       return serviceAccountClient;
     } catch (err) {
-      serviceAccountClientError = new Error(
-        'Unable to load Kubernetes configuration — expected in local dev without kubectl configured'
-      );
+      serviceAccountClientError = new Error('Unable to load Kubernetes configuration — expected in local dev without kubectl configured');
       serviceAccountClientError.cause = err;
       throw serviceAccountClientError;
     }
@@ -208,23 +233,7 @@ export function workspaceToResponse(ws: K8sWorkspace): WorkspaceResponse {
       annotations: ws.metadata?.annotations ?? {},
       creationTimestamp: ws.metadata?.creationTimestamp ?? '',
     },
-    spec: {
-      displayName: ws.spec?.displayName ?? '',
-      image: ws.spec?.image ?? '',
-      desiredStatus: ws.spec?.desiredStatus ?? '',
-      accessType: ws.spec?.accessType ?? '',
-      ownershipType: ws.spec?.ownershipType ?? '',
-      resources: {
-        limits: {
-          cpu: ws.spec?.resources?.limits?.cpu ?? '',
-          memory: ws.spec?.resources?.limits?.memory ?? '',
-        },
-        requests: {
-          cpu: ws.spec?.resources?.requests?.cpu ?? '',
-          memory: ws.spec?.resources?.requests?.memory ?? '',
-        },
-      },
-    },
+    spec: ws.spec ?? {},
     status: ws.status
       ? {
           accessURL: ws.status.accessURL ?? '',
@@ -240,61 +249,11 @@ export function workspaceToResponse(ws: K8sWorkspace): WorkspaceResponse {
 }
 
 export function templateToResponse(tmpl: K8sWorkspaceTemplate): TemplateResponse {
-  const resp: TemplateResponse = {
-    name: tmpl.metadata?.name ?? '',
-    namespace: tmpl.metadata?.namespace ?? '',
-    displayName: tmpl.spec?.displayName ?? '',
-    description: tmpl.spec?.description ?? '',
-    defaultImage: tmpl.spec?.defaultImage ?? '',
-    allowedImages: tmpl.spec?.allowedImages ?? [],
-    allowCustomImages: tmpl.spec?.allowCustomImages ?? false,
-    defaultAccessType: tmpl.spec?.defaultAccessType ?? '',
-    defaultOwnershipType: tmpl.spec?.defaultOwnershipType ?? '',
+  return {
+    metadata: {
+      name: tmpl.metadata?.name ?? '',
+      namespace: tmpl.metadata?.namespace ?? '',
+    },
+    spec: tmpl.spec ?? {},
   };
-
-  const bounds = tmpl.spec?.resourceBounds?.resources;
-  if (bounds) {
-    resp.resourceBounds = {};
-    if (bounds.cpu) {
-      resp.resourceBounds.cpu = { min: bounds.cpu.min ?? '', max: bounds.cpu.max ?? '' };
-    }
-    if (bounds.memory) {
-      resp.resourceBounds.memory = { min: bounds.memory.min ?? '', max: bounds.memory.max ?? '' };
-    }
-    if (bounds['nvidia.com/gpu']) {
-      resp.resourceBounds.gpu = {
-        min: bounds['nvidia.com/gpu'].min ?? '',
-        max: bounds['nvidia.com/gpu'].max ?? '',
-      };
-    }
-  }
-
-  if (tmpl.spec?.defaultResources) {
-    resp.defaultResources = {
-      cpu: tmpl.spec.defaultResources.requests?.cpu ?? '',
-      memory: tmpl.spec.defaultResources.requests?.memory ?? '',
-    };
-  }
-
-  if (tmpl.spec?.primaryStorage) {
-    resp.storageConfig = {
-      defaultSize: tmpl.spec.primaryStorage.defaultSize ?? '',
-      minSize: tmpl.spec.primaryStorage.minSize ?? '',
-      maxSize: tmpl.spec.primaryStorage.maxSize ?? '',
-      mountPath: tmpl.spec.primaryStorage.defaultMountPath ?? '',
-    };
-  }
-
-  if (tmpl.spec?.defaultIdleShutdown) {
-    resp.idleShutdown = {
-      enabled: tmpl.spec.defaultIdleShutdown.enabled ?? false,
-      defaultTimeoutMinutes: tmpl.spec.defaultIdleShutdown.idleTimeoutInMinutes ?? 0,
-    };
-    if (tmpl.spec.idleShutdownOverrides) {
-      resp.idleShutdown.minTimeoutMinutes = tmpl.spec.idleShutdownOverrides.minIdleTimeoutInMinutes;
-      resp.idleShutdown.maxTimeoutMinutes = tmpl.spec.idleShutdownOverrides.maxIdleTimeoutInMinutes;
-    }
-  }
-
-  return resp;
 }

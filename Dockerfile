@@ -21,14 +21,11 @@ COPY --from=builder --chown=1000:1000 /app/dist ./dist
 COPY --from=builder --chown=1000:1000 /app/server ./server
 COPY --from=builder --chown=1000:1000 /app/package.json ./package.json
 
-# Install production dependencies only
-RUN bun install --production --frozen-lockfile
+# Install production dependencies only (skip lifecycle scripts — husky is dev-only)
+RUN bun install --production --frozen-lockfile --ignore-scripts
 
 USER 1000:1000
 
 EXPOSE 8090
-
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD bun --version > /dev/null || exit 1
 
 CMD ["bun", "run", "start"]
